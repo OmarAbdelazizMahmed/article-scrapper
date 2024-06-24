@@ -50,6 +50,10 @@ def replace_deprecated_tags(html_content):
             if new_tag_attrs:
                 attrs = dict(attr.split('=') for attr in new_tag_attrs.split() if '=' in attr)
                 tag.attrs.update(attrs)
+    for tag in soup.find_all():
+        # Remove attributes from all tags
+        tag.attrs = {}
+            
     return str(soup)
 
 def initialize_driver():
@@ -112,8 +116,6 @@ def get_articles(domain, category_keyword, num_articles=10, selectors=None):
                 sleep(2)  # Adding delay to handle dynamic content loading
                 article_soup = BeautifulSoup(driver.page_source, 'html.parser')
 
-                # content_element = article_soup.find(selectors['content']['type'], selectors['content']['name'])
-                # content = content_element.encode_contents() if content_element else ''
                 content_element = article_soup.find(class_=re.compile(".*content.*"))
                 content = content_element.encode_contents() if content_element else ''
 
