@@ -1,5 +1,5 @@
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 import pandas as pd
 from time import sleep
 import logging
@@ -12,7 +12,6 @@ import re
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Define a mapping of deprecated tags to new tags
 TAG_MAPPING = {
     'strike': 's',
     'u': 'span class="underline"',
@@ -21,7 +20,6 @@ TAG_MAPPING = {
     'center': 'div style="text-align: center;"',
     'font': 'span',
     'big': 'span style="font-size: larger;"',
-    'small': 'span style="font-size: smaller;"',
     'tt': 'code',
     'abbr': 'span class="abbr"',
     'acronym': 'span class="acronym"',
@@ -41,99 +39,139 @@ TAG_MAPPING = {
     'h6': 'h2',
 }
 
-def replace_deprecated_tags(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    for deprecated_tag, new_tag in TAG_MAPPING.items():
-        for tag in soup.find_all(deprecated_tag):
-            new_tag_name, _, new_tag_attrs = new_tag.partition(' ')
-            tag.name = new_tag_name
-            if new_tag_attrs:
-                attrs = dict(attr.split('=') for attr in new_tag_attrs.split() if '=' in attr)
-                tag.attrs.update(attrs)
-    for tag in soup.find_all():
-        # Remove attributes from all tags
-        tag.attrs = {}
+ALLOWED_TAGS = ['div', 'article', 'p', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'small', 'a', 'button']
+
+def replaceDeprecatedTags(htmlContent):
+    soup = BeautifulSoup(htmlContent, 'html.parser')
+    
+    # Remove comments from soup
+    comments = soup.find_all(string=lambda text: isinstance(text, Comment))
+    for comment in comments:
+        comment.extract()
+    
+    # Remove script tags and their contents
+    for script in soup.find_all('script'):
+        script.extract()
+
+    # Remove specific CSS blocks
+    for style_tag in soup.find_all('style'):
+        style_text = style_tag.get_text()
+        if 'webapp-compat-navigation:not(.WebappCompatPlaceholder)' in style_text \
+                or 'webapp-compat-navigation-empty:not(.WebappCompatPlaceholder)' in style_text \
+                or 'webapp-compat-seo-navbar.WebappCompatPlaceholder' in style_text \
+                or 'app-seo-navbar' in style_text:
+            style_tag.extract()
+
+    for tag in soup.find_all(True):
+        if tag.name not in ALLOWED_TAGS:
+            if tag.name in TAG_MAPPING:
+                newTag = TAG_MAPPING[tag.name]
+                if newTag.startswith('<'):
+                    newTag = BeautifulSoup(newTag, 'html.parser').find()
+                    tag.replace_with(newTag)
+                else:
+                    tag.name = newTag
+            else:
+                tag.unwrap()  # Remove tags not in allowed list
+        else:
+            if tag.name == 'a':
+                href = tag.get('href')
+                if href and not href.startswith('http'):
+                    tag.unwrap()
+                else:
+                    tag.attrs = {}  # Remove all attributes from 'a' tags
+            else:
+                tag.attrs = {}  # Remove all attributes from other allowed tags
             
     return str(soup)
 
-def initialize_driver():
-    """Initialize and return a headless Selenium WebDriver."""
+def extractTextWithHtml(articleSoup):
+    body_tag = articleSoup.find('body')
+    if body_tag:
+        return str(body_tag)
+    else:
+        return ""
+
+def initializeDriver():
     options = Options()
     options.headless = True
     driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
     return driver
 
-def get_articles(domain, category_keyword, num_articles=10, selectors=None):
+def getArticles(domain, categoryKeyword, numArticles=10, selectors=None):
     articles = []
     page = 1
-    driver = initialize_driver()
+    driver = initializeDriver()
 
     while True:
         url = urljoin(domain, f"?page={page}")
         logging.info(f"Fetching URL: {url}")
         
         driver.get(url)
-        sleep(2)  # Adding delay to handle dynamic content loading
+        sleep(2)
 
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        article_elements = []
-        article_selector = selectors.get('article', {})
-        if article_selector['type'] == 'tag':
-            article_elements = soup.find_all(article_selector['name'])
-        elif article_selector['type'] == 'class':
-            article_elements = soup.find_all(class_=article_selector['name'])
+        articleElements = []
+        articleSelector = selectors.get('article', {})
+        if articleSelector['type'] == 'tag':
+            articleElements = soup.find_all(articleSelector['name'])
+        elif articleSelector['type'] == 'class':
+            articleElements = soup.find_all(class_=articleSelector['name'])
         else:
-            logging.error(f"Unsupported selector type: {article_selector['type']}")
+            logging.error(f"Unsupported selector type: {articleSelector['type']}")
             continue
 
-        if not article_elements:
+        if not articleElements:
             logging.info("No more articles found.")
             break
 
-        for article in article_elements:
+        for article in articleElements:
             try:
                 if selectors['title']['type'] == 'class':
-                    title_element = article.find(class_=selectors['title']['name'])
+                    titleElement = article.find(class_=selectors['title']['name'])
                 elif selectors['title']['type'] == 'tag':
-                    title_element = article.find(selectors['title']['name'])
+                    titleElement = article.find(selectors['title']['name'])
 
-                if not title_element:
+                if not titleElement:
                     logging.warning("Title element not found")
                     continue
-                title = title_element.get_text(strip=True)
-                link_element = article.find('a')
-                if not link_element or 'href' not in link_element.attrs:
+                title = titleElement.get_text(strip=True)
+                
+                linkElement = article.find('a')
+                if not linkElement or 'href' not in linkElement.attrs:
                     logging.warning("Link element not found or missing href attribute")
                     continue
-                link = link_element['href']
-                date_element = article.find(selectors['date']['type'], selectors['date']['name'])
-                date = date_element.get_text(strip=True) if date_element else ''
-    
-                full_link = urljoin(domain, link)
-                logging.info(f"Visiting article URL: {full_link}")
-                driver.get(full_link)
-                sleep(2)  # Adding delay to handle dynamic content loading
-                article_soup = BeautifulSoup(driver.page_source, 'html.parser')
+                link = linkElement['href']
+                
+                dateElement = article.find(selectors['date']['type'], selectors['date']['name'])
+                date = dateElement.get_text(strip=True) if dateElement else ''
+                
+                fullLink = urljoin(domain, link)
+                logging.info(f"Visiting article URL: {fullLink}")
+                driver.get(fullLink)
+                sleep(2)
+                articleSoup = BeautifulSoup(driver.page_source, 'html.parser')
 
-                content_element = article_soup.find(class_=re.compile(".*content.*"))
-                content = content_element.encode_contents() if content_element else ''
+                content_with_html = extractTextWithHtml(articleSoup)
+                content = replaceDeprecatedTags(content_with_html)
 
-                if re.search(re.escape(category_keyword).replace('\\*', '.*'), full_link, re.IGNORECASE) \
-                        or re.search(re.escape(category_keyword).replace('\\*', '.*'), title, re.IGNORECASE):
+                if re.search(re.escape(categoryKeyword).replace('\\*', '.*'), fullLink, re.IGNORECASE) \
+                        or re.search(re.escape(categoryKeyword).replace('\\*', '.*'), title, re.IGNORECASE):
                     articles.append({
                         'title': title,
-                        'link': full_link,
+                        'link': fullLink,
                         'date': date,
-                        'content': replace_deprecated_tags(content.decode())
+                        'content': content,
+                        'content_with_html': content_with_html
                     })
 
-                if len(articles) >= num_articles:
+                if len(articles) >= numArticles:
                     break
             except AttributeError as e:
                 logging.error(f"Error processing article: {e}")
 
-        if len(articles) >= num_articles:
+        if len(articles) >= numArticles:
             break
 
         page += 1
@@ -142,19 +180,19 @@ def get_articles(domain, category_keyword, num_articles=10, selectors=None):
     driver.quit()
     return articles
 
-def save_to_excel(articles, filename):
+def saveToExcel(articles, filename):
     df = pd.DataFrame(articles)
     df.to_excel(filename, index=False)
     logging.info(f"Data saved to {filename}")
 
-def save_to_csv(articles, filename):
+def saveToCsv(articles, filename):
     df = pd.DataFrame(articles)
     df.to_csv(filename, index=False)
     logging.info(f"Data saved to {filename}")
 
 # Usage example
 domain = "https://www.freelancer.com/community/freelancing"
-category_keyword = "freelance"
+categoryKeyword = "freelance"
 selectors = {
     'article': {
         'type': 'tag',
@@ -173,6 +211,6 @@ selectors = {
         'name': 'article-content'
     }
 }
-articles = get_articles(domain, category_keyword, num_articles=10, selectors=selectors)
-# save_to_excel(articles, "articles.xlsx")
-save_to_csv(articles, "articles.csv")
+articles = getArticles(domain, categoryKeyword, numArticles=10, selectors=selectors)
+# saveToExcel(articles, "articles.xlsx")
+saveToCsv(articles, "articles.csv")
